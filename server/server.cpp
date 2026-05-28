@@ -19,17 +19,8 @@ using namespace std;
 const int PORT = 12345;
 const int BUF_SIZE = 4096;
 
-struct ClientInfo {
-    SOCKET sock;
-    string name;
-    string room;
-};
-
-struct ChatMessage {
-    string sender;
-    string message;
-    string timestamp;
-};
+struct ClientInfo { SOCKET sock; string name; string room; };
+struct ChatMessage { string sender; string message; string timestamp; };
 
 vector<ClientInfo> clients;
 map<string, vector<ChatMessage>> chatHistory;
@@ -39,33 +30,23 @@ string GetTimestamp() {
     time_t t = time(nullptr);
     char buf[64];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&t));
-    return string(buf);
+    return buf;
 }
 
-void SendToClient(SOCKET s, const string& msg) {
-    send(s, msg.c_str(), msg.length() + 1, 0);
+// Получить папку, где лежит server.exe
+string GetExeDirectory() {
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    string full(path);
+    size_t pos = full.find_last_of("\\/");
+    if (pos != string::npos) return full.substr(0, pos + 1);
+    return "";
 }
 
-void BroadcastToAll(const string& msg, SOCKET exclude = INVALID_SOCKET) {
-    lock_guard<mutex> lock(g_mutex);
-    for (auto& c : clients) {
-        if (c.sock != exclude) {
-            send(c.sock, msg.c_str(), msg.length() + 1, 0);
-        }
-    }
-}
-
-void BroadcastToRoom(const string& room, const string& msg, SOCKET exclude = INVALID_SOCKET) {
-    lock_guard<mutex> lock(g_mutex);
-    for (auto& c : clients) {
-        if (c.room == room && c.sock != exclude) {
-            send(c.sock, msg.c_str(), msg.length() + 1, 0);
-        }
-    }
-}
-
+// Подсчёт пробелов в файле, который лежит рядом с сервером
 int CountSpacesInFile(const string& filename) {
-    ifstream f(filename);
+    string fullPath = GetExeDirectory() + filename;
+    ifstream f(fullPath);
     if (!f.is_open()) return -1;
     int cnt = 0;
     char ch;
@@ -79,21 +60,29 @@ void SaveHistoryToFile(const string& room) {
     lock_guard<mutex> lock(g_mutex);
     if (f) {
         f << "=== История комнаты " << room << " ===\n";
-        for (auto& msg : chatHistory[room]) {
+        for (auto& msg : chatHistory[room])
             f << "[" << msg.timestamp << "] " << msg.sender << ": " << msg.message << "\n";
-        }
-        f.close();
     }
 }
 
+void BroadcastToAll(const string& msg, SOCKET exclude = INVALID_SOCKET) {
+    lock_guard<mutex> lock(g_mutex);
+    for (auto& c : clients)
+        if (c.sock != exclude)
+            send(c.sock, msg.c_str(), msg.length() + 1, 0);
+}
+
+void BroadcastToRoom(const string& room, const string& msg, SOCKET exclude = INVALID_SOCKET) {
+    lock_guard<mutex> lock(g_mutex);
+    for (auto& c : clients)
+        if (c.room == room && c.sock != exclude)
+            send(c.sock, msg.c_str(), msg.length() + 1, 0);
+}
+
 void HandleClient(SOCKET clientSock) {
-    // Получаем имя клиента (первое сообщение)
     char buffer[BUF_SIZE];
     int bytes = recv(clientSock, buffer, BUF_SIZE - 1, 0);
-    if (bytes <= 0) {
-        closesocket(clientSock);
-        return;
-    }
+    if (bytes <= 0) { closesocket(clientSock); return; }
     buffer[bytes] = '\0';
     string clientName = buffer;
     string clientRoom = "main";
@@ -110,49 +99,35 @@ void HandleClient(SOCKET clientSock) {
     while (true) {
         memset(buffer, 0, BUF_SIZE);
         bytes = recv(clientSock, buffer, BUF_SIZE - 1, 0);
-        if (bytes <= 0) {
-            cout << "[-] " << clientName << " отключился" << endl;
-            break;
-        }
+        if (bytes <= 0) break;
         string cmd(buffer);
-        // Удаляем возможные \r\n
         cmd.erase(remove(cmd.begin(), cmd.end(), '\r'), cmd.end());
         cmd.erase(remove(cmd.begin(), cmd.end(), '\n'), cmd.end());
-
         cout << "[MSG] от " << clientName << ": " << cmd << endl;
 
-        // --- Обработка команд ---
-        if (cmd == "/exit") {
-            break;
-        }
+        if (cmd == "/exit") break;
         else if (cmd.rfind("/room ", 0) == 0) {
-            string newRoom = cmd.substr(6);
-            clientRoom = newRoom;
+            clientRoom = cmd.substr(6);
             lock_guard<mutex> lock(g_mutex);
-            for (auto& c : clients) {
-                if (c.sock == clientSock) c.room = newRoom;
-            }
-            string resp = "Вы перешли в комнату " + newRoom;
+            for (auto& c : clients) if (c.sock == clientSock) c.room = clientRoom;
+            string resp = "Вы перешли в комнату " + clientRoom;
             send(clientSock, resp.c_str(), resp.length() + 1, 0);
         }
         else if (cmd.rfind("/spaces ", 0) == 0) {
             string fname = cmd.substr(8);
             int spaces = CountSpacesInFile(fname);
             ostringstream oss;
-            if (spaces >= 0)
-                oss << "Пробелов в файле " << fname << ": " << spaces;
-            else
-                oss << "Ошибка: файл " << fname << " не найден";
+            if (spaces >= 0) oss << "Пробелов в файле " << fname << ": " << spaces;
+            else oss << "Ошибка: файл " << fname << " не найден";
             string resp = oss.str();
             send(clientSock, resp.c_str(), resp.length() + 1, 0);
         }
         else if (cmd.rfind("/sendfile ", 0) == 0) {
             string fname = cmd.substr(10);
-            // Ожидаем размер файла
             DWORD fileSize;
             bytes = recv(clientSock, (char*)&fileSize, sizeof(fileSize), 0);
             if (bytes != sizeof(fileSize)) continue;
-            string savePath = "received_" + fname;
+            string savePath = GetExeDirectory() + "received_" + fname;
             HANDLE hFile = CreateFileA(savePath.c_str(), GENERIC_WRITE, 0, NULL,
                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hFile == INVALID_HANDLE_VALUE) {
@@ -174,7 +149,8 @@ void HandleClient(SOCKET clientSock) {
         }
         else if (cmd.rfind("/getfile ", 0) == 0) {
             string fname = cmd.substr(9);
-            HANDLE hFile = CreateFileA(fname.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+            string fullPath = GetExeDirectory() + fname;
+            HANDLE hFile = CreateFileA(fullPath.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
             if (hFile == INVALID_HANDLE_VALUE) {
                 DWORD zero = 0;
@@ -186,9 +162,8 @@ void HandleClient(SOCKET clientSock) {
             DWORD fileSize = GetFileSize(hFile, NULL);
             send(clientSock, (char*)&fileSize, sizeof(fileSize), 0);
             DWORD br;
-            while (ReadFile(hFile, buffer, BUF_SIZE, &br, NULL) && br > 0) {
+            while (ReadFile(hFile, buffer, BUF_SIZE, &br, NULL) && br > 0)
                 send(clientSock, buffer, br, 0);
-            }
             CloseHandle(hFile);
         }
         else if (cmd.rfind("/save ", 0) == 0) {
@@ -202,11 +177,7 @@ void HandleClient(SOCKET clientSock) {
             string fname = "chat_history_" + room + ".txt";
             ifstream f(fname);
             string content;
-            if (f) {
-                string line;
-                while (getline(f, line)) content += line + "\n";
-                f.close();
-            }
+            if (f) { string line; while (getline(f, line)) content += line + "\n"; }
             if (content.empty()) content = "История комнаты " + room + " пуста";
             send(clientSock, content.c_str(), content.length() + 1, 0);
         }
@@ -224,7 +195,7 @@ void HandleClient(SOCKET clientSock) {
                 " /room <название>   - сменить комнату\n"
                 " /spaces <файл>     - подсчитать пробелы (файл на сервере)\n"
                 " /sendfile <путь>   - отправить файл на сервер\n"
-                " /getfile <имя>     - скачать файл с сервера (сохраняется в папку клиента)\n"
+                " /getfile <имя>     - скачать файл с сервера\n"
                 " /save <комната>    - сохранить историю комнаты в файл\n"
                 " /view <комната>    - показать сохранённую историю\n"
                 " /broad <сообщение> - отправить всем клиентам\n"
@@ -233,7 +204,6 @@ void HandleClient(SOCKET clientSock) {
             send(clientSock, help.c_str(), help.length() + 1, 0);
         }
         else {
-            // Обычное сообщение – сохраняем в историю комнаты и рассылаем в комнату
             ChatMessage msg{ clientName, cmd, GetTimestamp() };
             string formatted = "[" + msg.timestamp + "] " + clientName + ": " + cmd;
             {
@@ -241,89 +211,47 @@ void HandleClient(SOCKET clientSock) {
                 chatHistory[clientRoom].push_back(msg);
             }
             BroadcastToRoom(clientRoom, formatted, clientSock);
-            // Отправить самому себе тоже (чтобы видел своё сообщение)
             send(clientSock, formatted.c_str(), formatted.length() + 1, 0);
         }
     }
 
-    // Удаляем клиента
     {
         lock_guard<mutex> lock(g_mutex);
-        for (auto it = clients.begin(); it != clients.end(); ++it) {
-            if (it->sock == clientSock) {
-                clients.erase(it);
-                break;
-            }
-        }
+        for (auto it = clients.begin(); it != clients.end(); ++it)
+            if (it->sock == clientSock) { clients.erase(it); break; }
     }
     closesocket(clientSock);
+    cout << "[-] " << clientName << " отключился" << endl;
 }
 
 int main() {
-    SetConsoleCP(1251);
-    SetConsoleOutputCP(1251);
-
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        cout << "Ошибка WinSock" << endl;
-        return 1;
-    }
-
+    SetConsoleCP(1251); SetConsoleOutputCP(1251);
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
     SOCKET listenSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenSock == INVALID_SOCKET) {
-        cout << "Ошибка socket" << endl;
-        WSACleanup();
-        return 1;
-    }
-
-    sockaddr_in servAddr;
-    servAddr.sin_family = AF_INET;
-    servAddr.sin_port = htons(PORT);
-    servAddr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(listenSock, (sockaddr*)&servAddr, sizeof(servAddr)) == SOCKET_ERROR) {
-        cout << "Ошибка bind" << endl;
-        closesocket(listenSock);
-        WSACleanup();
-        return 1;
-    }
-
-    if (listen(listenSock, SOMAXCONN) == SOCKET_ERROR) {
-        cout << "Ошибка listen" << endl;
-        closesocket(listenSock);
-        WSACleanup();
-        return 1;
-    }
-
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    bind(listenSock, (sockaddr*)&addr, sizeof(addr));
+    listen(listenSock, SOMAXCONN);
     cout << "=== СЕРВЕР ЗАПУЩЕН на порту " << PORT << " ===" << endl;
 
     while (true) {
         sockaddr_in clientAddr;
-        int addrLen = sizeof(clientAddr);
-        SOCKET clientSock = accept(listenSock, (sockaddr*)&clientAddr, &addrLen);
-        if (clientSock == INVALID_SOCKET) {
-            cout << "Ошибка accept" << endl;
-            continue;
-        }
+        int len = sizeof(clientAddr);
+        SOCKET clientSock = accept(listenSock, (sockaddr*)&clientAddr, &len);
+        if (clientSock == INVALID_SOCKET) continue;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &clientAddr.sin_addr, ip, INET_ADDRSTRLEN);
         cout << "[+] Новый клиент из " << ip << endl;
-
-        // Запрашиваем имя клиента
         send(clientSock, "NAME", 5, 0);
         char nameBuf[256];
         int bytes = recv(clientSock, nameBuf, sizeof(nameBuf) - 1, 0);
-        if (bytes <= 0) {
-            closesocket(clientSock);
-            continue;
-        }
+        if (bytes <= 0) { closesocket(clientSock); continue; }
         nameBuf[bytes] = '\0';
-        string clientName = nameBuf;
-
-        thread t(HandleClient, clientSock);
-        t.detach();
+        thread(HandleClient, clientSock).detach();
     }
-
     closesocket(listenSock);
     WSACleanup();
     return 0;

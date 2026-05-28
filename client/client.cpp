@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstring>
 #include <vector>
+#include <sstream>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -27,8 +28,11 @@ void ReceiveThread() {
             break;
         }
         buffer[bytes] = '\0';
-        cout << "\n" << buffer << "\n> ";
-        cout.flush();
+        // Не выводим служебное сообщение "NAME"
+        if (strcmp(buffer, "NAME") != 0) {
+            cout << "\n" << buffer << "\n> ";
+            cout.flush();
+        }
     }
 }
 
@@ -149,12 +153,16 @@ int main() {
     cout << "Подключено к серверу!" << endl;
 
     // Получаем запрос имени от сервера
-    char nameReq[5];
-    recv(clientSock, nameReq, 5, 0);
+    char nameReq[5] = { 0 };
+    recv(clientSock, nameReq, 4, 0); // Принимаем только "NAME"
     if (strcmp(nameReq, "NAME") == 0) {
         string name;
         cout << "Введите ваше имя: ";
         getline(cin, name);
+        // Удаляем лишние пробелы
+        name.erase(0, name.find_first_not_of(" \t\r\n"));
+        name.erase(name.find_last_not_of(" \t\r\n") + 1);
+        if (name.empty()) name = "Anonymous";
         send(clientSock, name.c_str(), name.length() + 1, 0);
     }
 
@@ -168,6 +176,9 @@ int main() {
     while (true) {
         cout << "> ";
         getline(cin, input);
+        // Удаляем пробелы в начале и конце
+        input.erase(0, input.find_first_not_of(" \t\r\n"));
+        input.erase(input.find_last_not_of(" \t\r\n") + 1);
         if (input.empty()) continue;
 
         if (input == "/exit") {
@@ -186,7 +197,7 @@ int main() {
             ShowHelp();
         }
         else {
-            // Любая команда или сообщение – просто отправляем серверу
+            // Отправляем команду или сообщение
             send(clientSock, input.c_str(), input.length() + 1, 0);
         }
     }
